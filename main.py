@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import logging
 import sqlite3
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
@@ -10,9 +13,20 @@ from rich.console import Console
 from rich.logging import RichHandler
 from yarl import URL
 
+
+class ForumThreadTuple(NamedTuple):
+    host: str
+    name: str
+    page: int | None
+    post: int | None
+    path_qs: str
+
+
 app = FastAPI()
 
 logger = logging.getLogger(__name__)
+
+all_urls = set()
 
 
 def setup_logger() -> None:
@@ -42,62 +56,96 @@ class DatabaseEntry(BaseModel):
 THREAD_PARTS = "threads", "topic"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class ForumThread:
-    origin: InitVar[HttpUrl]
-    url: URL = field(init=False)
-    name: str = field(init=False)
-    page: int = field(default=1, init=False)
-    thread_path: str = field(default="/", init=False)
-    _id: int = field(init=False)
-    post_number: int | None = field(default=None, init=False)
-
-    def __post_init__(self, origin: HttpUrl) -> None:
-        self.url = URL(str(origin))
-        if not self.url.host or not any(part in self.url.parts for part in THREAD_PARTS):
-            raise ValueError("Invalid forum thread URL")
-
-        found_part = next(part for part in THREAD_PARTS if part in self.url.parts)
-        name_index = self.url.parts.index(found_part) + 1
-        name = self.url.parts[name_index]
-        if "." not in name:
-            raise ValueError("Invalid forum thread URL")
-
-        post_sections = {self.url.fragment, *self.url.parts}
-        post_string = next((sec for sec in post_sections if "post-" in sec), None)
-        if post_string:
-            self.post_number = int(post_string.replace("post-", "").strip())
-
-        if len(self.url.parts) > name_index + 1 and "page-" in self.url.parts[name_index + 1]:
-            self.page = int(self.url.parts[name_index + 1].replace("page-", "").strip())
-
-        self.name, _id = name.rsplit(".")
-        self.name = self.name.strip()
-        self._id = int(_id.strip())
-        self.thread_path = "/" + "/".join(self.url.parts[1 : name_index + 1])
+    host: str
+    name: str
+    _id: int
+    page: int = field(default=1)
+    thread_path: str = field(default="/")
+    post_number: int | None = field(default=None, compare=False, hash=False)
+    path_qs: str = field(default="", compare=False, hash=False)
 
     @property
-    def as_tuple(self) -> tuple[str, str, str, int, int]:
-        return self.url.host, self.name, self.page, self.post_number, self.url.path_qs  # type: ignore
+    def as_tuple(self) -> ForumThreadTuple:
+        return ForumThreadTuple(self.host, self.name, self.page, self.post_number, self.path_qs)  # type: ignore
+
+    @classmethod
+    def from_row(cls, row: dict) -> ForumThread:
+        url = "https://" + row["host"] + row["path_qs"]
+        return cls.from_url(url)
+
+    @classmethod
+    def from_url(cls, origin: HttpUrl) -> ForumThread:
+        url = URL(str(origin))
+        msg = f"Invalid forum thread URL: {url}"
+        if not url.host or not any(part in url.parts for part in THREAD_PARTS):
+            raise ValueError(msg)
+
+        host = url.host
+        found_part = next(part for part in THREAD_PARTS if part in url.parts)
+        name_index = url.parts.index(found_part) + 1
+        name = url.parts[name_index]
+        if "." not in name:
+            raise ValueError(msg)
+
+        post_sections = {url.fragment, *url.parts}
+        post_string = next((sec for sec in post_sections if "post-" in sec), None)
+        post_number = None
+        if post_string:
+            post_number = int(post_string.replace("post-", "").strip())
+
+        page = 1
+        if len(url.parts) > name_index + 1 and "page-" in url.parts[name_index + 1]:
+            page = int(url.parts[name_index + 1].replace("page-", "").strip())
+
+        name, _id = name.rsplit(".")
+        name = name.strip()
+        _id = int(_id.strip())
+        thread_path = "/" + "/".join(url.parts[1 : name_index + 1])
+
+        return cls(
+            host=host,
+            name=name,
+            post_number=post_number,
+            page=page,
+            _id=_id,
+            thread_path=thread_path,
+            path_qs=url.path_qs,
+        )
+
+    @property
+    def url(self) -> URL:
+        url = URL("https://" + self.host + self.path_qs)
+        if self.post_number:
+            url = url.with_fragment(f"post-{self.post_number}")
+        return url
 
 
 def save_data(data: DatabaseEntry) -> None:
     try:
-        forum_thread = ForumThread(data.origin)
+        forum_thread = ForumThread.from_url(data.origin)
         save_forum_thread_urls(forum_thread, data.urls)
     except ValueError:
         save_other_urls(data.origin, data.urls)
 
 
 def save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
+    global all_urls
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
+    before = len(all_urls)
     query = (
         "INSERT OR IGNORE INTO forum_threads (host, name, page, post, path_qs, url, date) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     for url in urls:
+        if (forum_thread, url) in all_urls:
+            logger.info(f"Skipped: {forum_thread.url} with {url}")
+            continue
         cursor.execute(query, (*forum_thread.as_tuple, url, date_received))
+        all_urls.add((forum_thread, url))
+    logger.info(f"Added {before - len(all_urls)} urls")
     conn.commit()
     conn.close()
 
@@ -115,10 +163,9 @@ def save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
 
 def get_urls_by_origin(origin: HttpUrl, page: int | None = None) -> list[str]:
     try:
-        forum_thread = ForumThread(origin)
+        forum_thread = ForumThread.from_url(origin)
         return get_forum_thread_urls(forum_thread, page)
     except ValueError:
-        return ["ok"]
         return get_other_urls(origin)
 
 
@@ -137,7 +184,18 @@ def get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None) ->
     return [row[0] for row in rows]
 
 
-def get_other_urls(origin: str) -> list[str]:
+def get_current_forum_thread_urls() -> set[tuple[ForumThread, str]]:
+    conn = sqlite3.connect("data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    query = "SELECT * FROM forum_threads"
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    conn.close()
+    return {(ForumThread.from_row(row), row["url"]) for row in rows}
+
+
+def get_other_urls(origin: HttpUrl) -> list[str]:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     query = "SELECT url FROM other_urls WHERE origin = ?"
@@ -196,3 +254,4 @@ def init_db():
 
 setup_logger()
 init_db()
+all_urls = get_current_forum_thread_urls()
