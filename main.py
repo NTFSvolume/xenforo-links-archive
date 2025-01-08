@@ -9,7 +9,7 @@ from yarl import URL
 app = FastAPI()
 
 class DatabaseEntry(BaseModel):
-    origin: str
+    origin: HttpUrl
     urls: list[str]
 
 
@@ -19,19 +19,42 @@ class ForumThread:
     url: URL = field(init=False)
     name: str = field(init=False)
     page: int = field(default=1,init=False)
+    path: str = field(default="/", init=False)
+    _id: int= field(init=False)
+    post_number: int| None = field(default=None,init=False)
 
     def __post_init__(self, origin: HttpUrl) -> None:
         self.url = URL(str(origin))
-        if not self.url.host or not any (part in self.url.parts for part in ("threads","topic")):
+        thread_parts = "threads","topic"
+        if not self.url.host or not any (part in self.url.parts for part in thread_parts):
             raise ValueError("Invalid forum thread URL")
-        self.name = self.url.name
+
+
+        found_part = next(part for part in thread_parts if part in self.url.parts)
+        name_index = self.url.parts.index(found_part) + 1
+        name = self.url.parts[name_index]
+        if "." not in name:
+            raise ValueError("Invalid forum thread URL")
+
+        post_sections = {self.url.fragment, *self.url.parts}
+        post_string = next((sec for sec in post_sections if "post-" in sec), None)
+        if post_string:
+            self.post_number = int(post_string.replace("post-","").strip())
+
+        if len(self.url.parts) > name_index + 1 and "page-" in self.url.parts[name_index+1]:
+            self.page = int(self.url.parts[name_index+1].replace("page-","").strip())
+
+        self.name, _id = name.rsplit(".")
+        self.name = self.name.strip()
+        self._id = int(_id.strip())
+        self.path = "/" + "/".join(self.url.parts[1:name_index+1])
 
     @property
     def as_tuple(self) -> tuple [str, str, str, int]:
         return self.url.host, self.url.path, self.name, self.page # type: ignore
 
 def save_data(data: DatabaseEntry) -> None:
-    forum_thread = ForumThread(data.origin)  # type: ignore
+    forum_thread = ForumThread(data.origin)
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
