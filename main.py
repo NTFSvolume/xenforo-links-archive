@@ -12,25 +12,23 @@ class DatabaseEntry(BaseModel):
     origin: HttpUrl
     urls: list[str]
 
-
+THREAD_PARTS = "threads","topic"
 @dataclass(slots=True)
 class ForumThread:
     origin: InitVar[HttpUrl]
     url: URL = field(init=False)
     name: str = field(init=False)
     page: int = field(default=1,init=False)
-    path: str = field(default="/", init=False)
+    thread_path: str = field(default="/", init=False)
     _id: int= field(init=False)
     post_number: int| None = field(default=None,init=False)
 
     def __post_init__(self, origin: HttpUrl) -> None:
         self.url = URL(str(origin))
-        thread_parts = "threads","topic"
-        if not self.url.host or not any (part in self.url.parts for part in thread_parts):
+        if not self.url.host or not any (part in self.url.parts for part in THREAD_PARTS):
             raise ValueError("Invalid forum thread URL")
 
-
-        found_part = next(part for part in thread_parts if part in self.url.parts)
+        found_part = next(part for part in THREAD_PARTS if part in self.url.parts)
         name_index = self.url.parts.index(found_part) + 1
         name = self.url.parts[name_index]
         if "." not in name:
@@ -47,7 +45,7 @@ class ForumThread:
         self.name, _id = name.rsplit(".")
         self.name = self.name.strip()
         self._id = int(_id.strip())
-        self.path = "/" + "/".join(self.url.parts[1:name_index+1])
+        self.thread_path = "/" + "/".join(self.url.parts[1:name_index+1])
 
     @property
     def as_tuple(self) -> tuple [str, str, str, int]:
@@ -107,6 +105,7 @@ def init_db():
             path TEXT,
             name TEXT,
             page NUMBER,
+            post NUMBER,
             url TEXT,
             date TEXT,
             UNIQUE(host, path, url)
