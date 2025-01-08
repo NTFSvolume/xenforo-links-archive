@@ -121,15 +121,15 @@ class ForumThread:
         )
 
 
-def save_data(data: DatabaseEntry) -> None:
+def save_data(data: DatabaseEntry) -> int:
     try:
         forum_thread = ForumThread.from_url(data.origin)
-        _save_forum_thread_urls(forum_thread, data.urls)
+        return _save_forum_thread_urls(forum_thread, data.urls)
     except ValueError:
-        _save_other_urls(data.origin, data.urls)
+        return _save_other_urls(data.origin, data.urls)
 
 
-def _save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
+def _save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> int:
     global all_urls
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
@@ -142,20 +142,25 @@ def _save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
             continue
         cursor.execute(query, (*forum_thread.as_tuple, url, date_received))
         all_urls.add((forum_thread, url))
-    logger.info(f"Added {len(all_urls) - before} url(s)")
+    new_urls = len(all_urls) - before
+    logger.info(f"Added {new_urls} url(s)")
     conn.commit()
     conn.close()
+    return new_urls
 
 
-def _save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
+def _save_other_urls(origin: HttpUrl, urls: list[str]) -> int:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
     query = "INSERT OR IGNORE INTO other_urls (origin, url, date) VALUES (?, ?, ?)"
+    before = len(all_urls)
     for url in sorted(urls):
         cursor.execute(query, (str(origin), url, date_received))
+    new_urls = len(all_urls) - before
     conn.commit()
     conn.close()
+    return new_urls
 
 
 def get_urls_by_origin(origin: HttpUrl, page: int | None = None) -> list[str]:
@@ -191,25 +196,31 @@ def _get_other_urls(origin: HttpUrl) -> list[str]:
     return [row[0] for row in rows]
 
 
-def get_current_forum_thread_urls() -> set[tuple[ForumThread, str]]:
+def get_urls() -> set[tuple[ForumThread | str, str]]:
     conn = sqlite3.connect("data.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     query = "SELECT * FROM forum_threads"
     cursor.execute(query)
     rows = cursor.fetchall()
+    forum_urls = {(ForumThread.from_row(row), row["url"]) for row in rows}
+    query = "SELECT * FROM other_urls"
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    other_urls = {tuple(row) for row in rows}
     conn.close()
-    return {(ForumThread.from_row(row), row["url"]) for row in rows}
+    return forum_urls | other_urls  # type: ignore
 
 
 @app.post("/submit")
 async def submit_data(data: DatabaseEntry):
     try:
-        save_data(data)
-        return {"message": "Data received and saved successfully"}
+        new_urls = save_data(data)
+        return {"status:": "OK", "message": f"Added {new_urls} new urls"}
     except Exception as e:
         logger.exception(f"{e}")
-        raise HTTPException(status_code=500, detail=str(e)) from None
+        details = f"status: ERROR - message: {e}"
+        raise HTTPException(status_code=500, detail=details) from None
 
 
 @app.get("/retrieve")
@@ -255,7 +266,7 @@ def main():
     global all_urls
     setup_logger()
     init_db()
-    all_urls = get_current_forum_thread_urls()
+    all_urls = get_urls()
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
