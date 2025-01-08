@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 from rich.console import Console
@@ -136,7 +137,7 @@ def _save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
     query = (
         "INSERT OR IGNORE INTO forum_threads (host, name, page, post, path_qs, url, date) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
-    for url in urls:
+    for url in sorted(urls):
         if (forum_thread, url) in all_urls:
             logger.info(f"Skipped: {forum_thread.url} with {url}")
             continue
@@ -152,7 +153,7 @@ def _save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
     query = "INSERT OR IGNORE INTO other_urls (origin, url, date) VALUES (?, ?, ?)"
-    for url in urls:
+    for url in sorted(urls):
         cursor.execute(query, (str(origin), url, date_received))
     conn.commit()
     conn.close()
@@ -250,6 +251,13 @@ def init_db():
     conn.close()
 
 
-setup_logger()
-init_db()
-all_urls = get_current_forum_thread_urls()
+def main():
+    global all_urls
+    setup_logger()
+    init_db()
+    all_urls = get_current_forum_thread_urls()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    main()
