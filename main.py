@@ -18,6 +18,7 @@ from yarl import URL
 class ForumThreadTuple(NamedTuple):
     host: str
     name: str
+    id_: int
     page: int | None
     post: int | None
     path_qs: str
@@ -58,7 +59,7 @@ THREAD_PARTS = "threads", "topic"
 class ForumThread:
     host: str
     name: str
-    _id: int
+    id_: int
     page: int = field(default=1)
     thread_path: str = field(default="/")
     post_number: int | None = field(default=None, compare=False, hash=False)
@@ -66,7 +67,7 @@ class ForumThread:
 
     @property
     def as_tuple(self) -> ForumThreadTuple:
-        return ForumThreadTuple(self.host, self.name, self.page, self.post_number, self.path_qs)  # type: ignore
+        return ForumThreadTuple(self.host, self.name, self.id_, self.page, self.post_number, self.path_qs)  # type: ignore
 
     @property
     def url(self) -> URL:
@@ -104,9 +105,9 @@ class ForumThread:
         if len(url.parts) > name_index + 1 and "page-" in url.parts[name_index + 1]:
             page = int(url.parts[name_index + 1].replace("page-", "").strip())
 
-        name, _id = name.rsplit(".")
+        name, id_ = name.rsplit(".")
         name = name.strip()
-        _id = int(_id.strip())
+        id_ = int(id_.strip())
         thread_path = "/" + "/".join(url.parts[1 : name_index + 1])
 
         return cls(
@@ -114,7 +115,7 @@ class ForumThread:
             name=name,
             post_number=post_number,
             page=page,
-            _id=_id,
+            id_=id_,
             thread_path=thread_path,
             path_qs=url.path_qs,
         )
@@ -134,9 +135,7 @@ def _save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
     before = len(all_urls)
-    query = (
-        "INSERT OR IGNORE INTO forum_threads (host, name, page, post, path_qs, url, date) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
+    query = "INSERT OR IGNORE INTO forum_threads (host, name, id, page, post, path_qs, url, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     for url in sorted(urls):
         if (forum_thread, url) in all_urls:
             logger.info(f"Skipped: {forum_thread.url} with {url}")
@@ -230,6 +229,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS forum_threads (
             host TEXT,
             name TEXT,
+            id NUMBER,
             page NUMBER,
             post NUMBER,
             url TEXT,
