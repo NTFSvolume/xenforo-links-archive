@@ -1,31 +1,60 @@
+import logging
 import sqlite3
 from dataclasses import InitVar, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
+from rich.console import Console
+from rich.logging import RichHandler
 from yarl import URL
 
 app = FastAPI()
+
+logger = logging.getLogger(__name__)
+
+
+def setup_logger() -> None:
+    logger.setLevel(10)
+    rich_file_handler = RichHandler(
+        console=Console(
+            file=Path("fast_api.log").open("w", encoding="utf8"),
+            width=180,
+        ),
+        level=10,
+    )
+
+    rich_handler = RichHandler(
+        show_time=False,
+        level=10,
+    )
+
+    logger.addHandler(rich_file_handler)
+    logger.addHandler(rich_handler)
+
 
 class DatabaseEntry(BaseModel):
     origin: HttpUrl
     urls: list[str]
 
-THREAD_PARTS = "threads","topic"
+
+THREAD_PARTS = "threads", "topic"
+
+
 @dataclass(slots=True)
 class ForumThread:
     origin: InitVar[HttpUrl]
     url: URL = field(init=False)
     name: str = field(init=False)
-    page: int = field(default=1,init=False)
+    page: int = field(default=1, init=False)
     thread_path: str = field(default="/", init=False)
-    _id: int= field(init=False)
-    post_number: int| None = field(default=None,init=False)
+    _id: int = field(init=False)
+    post_number: int | None = field(default=None, init=False)
 
     def __post_init__(self, origin: HttpUrl) -> None:
         self.url = URL(str(origin))
-        if not self.url.host or not any (part in self.url.parts for part in THREAD_PARTS):
+        if not self.url.host or not any(part in self.url.parts for part in THREAD_PARTS):
             raise ValueError("Invalid forum thread URL")
 
         found_part = next(part for part in THREAD_PARTS if part in self.url.parts)
@@ -37,19 +66,20 @@ class ForumThread:
         post_sections = {self.url.fragment, *self.url.parts}
         post_string = next((sec for sec in post_sections if "post-" in sec), None)
         if post_string:
-            self.post_number = int(post_string.replace("post-","").strip())
+            self.post_number = int(post_string.replace("post-", "").strip())
 
-        if len(self.url.parts) > name_index + 1 and "page-" in self.url.parts[name_index+1]:
-            self.page = int(self.url.parts[name_index+1].replace("page-","").strip())
+        if len(self.url.parts) > name_index + 1 and "page-" in self.url.parts[name_index + 1]:
+            self.page = int(self.url.parts[name_index + 1].replace("page-", "").strip())
 
         self.name, _id = name.rsplit(".")
         self.name = self.name.strip()
         self._id = int(_id.strip())
-        self.thread_path = "/" + "/".join(self.url.parts[1:name_index+1])
+        self.thread_path = "/" + "/".join(self.url.parts[1 : name_index + 1])
 
     @property
-    def as_tuple(self) -> tuple [str, str, str, int, int]:
-        return self.url.host, self.name, self.page, self.post_number, self.url.path_qs # type: ignore
+    def as_tuple(self) -> tuple[str, str, str, int, int]:
+        return self.url.host, self.name, self.page, self.post_number, self.url.path_qs  # type: ignore
+
 
 def save_data(data: DatabaseEntry) -> None:
     try:
@@ -58,36 +88,41 @@ def save_data(data: DatabaseEntry) -> None:
     except ValueError:
         save_other_urls(data.origin, data.urls)
 
-def save_forum_thread_urls(forum_thread: ForumThread, urls:list[str]) -> None:
+
+def save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
-    query = "INSERT OR IGNORE INTO forum_threads (host, name, page, post, path_qs, url, date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    query = (
+        "INSERT OR IGNORE INTO forum_threads (host, name, page, post, path_qs, url, date) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
     for url in urls:
-        cursor.execute(query,(*forum_thread.as_tuple, url, date_received))
+        cursor.execute(query, (*forum_thread.as_tuple, url, date_received))
     conn.commit()
     conn.close()
 
-def save_other_urls(origin: HttpUrl, urls:list[str]) -> None:
+
+def save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
     query = "INSERT OR IGNORE INTO other_urls (origin, url, date) VALUES (?, ?, ?)"
     for url in urls:
-        cursor.execute(query,(origin, url, date_received))
+        cursor.execute(query, (str(origin), url, date_received))
     conn.commit()
     conn.close()
 
 
-def get_urls_by_origin(origin: HttpUrl, page: int | None = None):
+def get_urls_by_origin(origin: HttpUrl, page: int | None = None) -> list[str]:
     try:
         forum_thread = ForumThread(origin)
         return get_forum_thread_urls(forum_thread, page)
     except ValueError:
+        return ["ok"]
         return get_other_urls(origin)
 
 
-def get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None):
+def get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None) -> list[str]:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     data = forum_thread.as_tuple[0:3]
@@ -102,11 +137,11 @@ def get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None):
     return [row[0] for row in rows]
 
 
-def get_other_urls(origin: HttpUrl):
+def get_other_urls(origin: str) -> list[str]:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     query = "SELECT url FROM other_urls WHERE origin = ?"
-    cursor.execute(query, (origin,))
+    cursor.execute(query, (str(origin),))
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
@@ -120,12 +155,14 @@ async def submit_data(data: DatabaseEntry):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from None
 
+
 @app.get("/retrieve")
 async def retrieve_data(origin: HttpUrl, page: int | None = Query(1, ge=1)):
     try:
         urls = get_urls_by_origin(origin, page)
         return {"urls": urls}
     except Exception as e:
+        logger.exception(f"{e}")
         raise HTTPException(status_code=500, detail=str(e)) from None
 
 
@@ -150,11 +187,12 @@ def init_db():
             origin TEXT,
             url TEXT,
             date TEXT,
-            UNIQUE(host, name, page, url)
+            UNIQUE(origin, url)
         )
     """)
     conn.commit()
     conn.close()
 
 
+setup_logger()
 init_db()
