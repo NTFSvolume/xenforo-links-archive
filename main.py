@@ -34,7 +34,7 @@ all_urls = set()
 def setup_logger() -> None:
     logger.setLevel(10)
     rich_file_handler = RichHandler(
-        console=Console(file=Path("fast_api.log").open("w", encoding="utf8"), width=180),
+        console=Console(file=Path("fast_api.log").open("w", encoding="utf8"), width=280),
         level=10,
     )
 
