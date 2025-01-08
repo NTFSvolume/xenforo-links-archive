@@ -32,10 +32,7 @@ all_urls = set()
 def setup_logger() -> None:
     logger.setLevel(10)
     rich_file_handler = RichHandler(
-        console=Console(
-            file=Path("fast_api.log").open("w", encoding="utf8"),
-            width=180,
-        ),
+        console=Console(file=Path("fast_api.log").open("w", encoding="utf8"), width=180),
         level=10,
     )
 
@@ -69,6 +66,13 @@ class ForumThread:
     @property
     def as_tuple(self) -> ForumThreadTuple:
         return ForumThreadTuple(self.host, self.name, self.page, self.post_number, self.path_qs)  # type: ignore
+
+    @property
+    def url(self) -> URL:
+        url = URL("https://" + self.host + self.path_qs)
+        if self.post_number:
+            url = url.with_fragment(f"post-{self.post_number}")
+        return url
 
     @classmethod
     def from_row(cls, row: dict) -> ForumThread:
@@ -114,23 +118,16 @@ class ForumThread:
             path_qs=url.path_qs,
         )
 
-    @property
-    def url(self) -> URL:
-        url = URL("https://" + self.host + self.path_qs)
-        if self.post_number:
-            url = url.with_fragment(f"post-{self.post_number}")
-        return url
-
 
 def save_data(data: DatabaseEntry) -> None:
     try:
         forum_thread = ForumThread.from_url(data.origin)
-        save_forum_thread_urls(forum_thread, data.urls)
+        _save_forum_thread_urls(forum_thread, data.urls)
     except ValueError:
-        save_other_urls(data.origin, data.urls)
+        _save_other_urls(data.origin, data.urls)
 
 
-def save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
+def _save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
     global all_urls
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
@@ -145,12 +142,12 @@ def save_forum_thread_urls(forum_thread: ForumThread, urls: list[str]) -> None:
             continue
         cursor.execute(query, (*forum_thread.as_tuple, url, date_received))
         all_urls.add((forum_thread, url))
-    logger.info(f"Added {before - len(all_urls)} urls")
+    logger.info(f"Added {len(all_urls) - before} url(s)")
     conn.commit()
     conn.close()
 
 
-def save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
+def _save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     date_received = datetime.now(UTC).isoformat()
@@ -164,12 +161,12 @@ def save_other_urls(origin: HttpUrl, urls: list[str]) -> None:
 def get_urls_by_origin(origin: HttpUrl, page: int | None = None) -> list[str]:
     try:
         forum_thread = ForumThread.from_url(origin)
-        return get_forum_thread_urls(forum_thread, page)
+        return _get_forum_thread_urls(forum_thread, page)
     except ValueError:
-        return get_other_urls(origin)
+        return _get_other_urls(origin)
 
 
-def get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None) -> list[str]:
+def _get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None) -> list[str]:
     conn = sqlite3.connect("data.db")
     cursor = conn.cursor()
     data = forum_thread.as_tuple[0:3]
@@ -179,6 +176,16 @@ def get_forum_thread_urls(forum_thread: ForumThread, page: int | None = None) ->
         data = forum_thread.as_tuple
 
     cursor.execute(query, (*data,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+
+def _get_other_urls(origin: HttpUrl) -> list[str]:
+    conn = sqlite3.connect("data.db")
+    cursor = conn.cursor()
+    query = "SELECT url FROM other_urls WHERE origin = ?"
+    cursor.execute(query, (str(origin),))
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
@@ -195,22 +202,13 @@ def get_current_forum_thread_urls() -> set[tuple[ForumThread, str]]:
     return {(ForumThread.from_row(row), row["url"]) for row in rows}
 
 
-def get_other_urls(origin: HttpUrl) -> list[str]:
-    conn = sqlite3.connect("data.db")
-    cursor = conn.cursor()
-    query = "SELECT url FROM other_urls WHERE origin = ?"
-    cursor.execute(query, (str(origin),))
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-
 @app.post("/submit")
 async def submit_data(data: DatabaseEntry):
     try:
         save_data(data)
         return {"message": "Data received and saved successfully"}
     except Exception as e:
+        logger.exception(f"{e}")
         raise HTTPException(status_code=500, detail=str(e)) from None
 
 
